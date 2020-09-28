@@ -190,7 +190,7 @@ defmodule ArrayTest do
 end
 ```
 
-Our `shift/1` function will need a private function `element_position/1` to make our `elements`
+Our `shift/1` function will need a private function `element_position/2` to make our `elements`
 tuple "cyclic". If we give it a position out of the tuple's bounds, we want it to add or subtract
 multiples of the tuple's size to give us a position within the tuple's bounds. This means, for
 example, if we give it a position of 9 when our tuple only has a size of 8, the position will be

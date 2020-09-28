@@ -1,7 +1,7 @@
 ---
 layout: post
 title:  "Collectable: Custom Data Structures in Elixir, part 2"
-date:   2020-09-19 12:00:00 -0600
+date:   2020-09-28 17:15:00 -0600
 categories: elixir protocol collectable
 permalink: /elixir/custom_data_structures/collectable
 ---
@@ -64,8 +64,9 @@ end
 ```
 
 For now our implementation of `push/2` will be pretty naive; it'll put an element at the next spot
-in the tuple and increment the array's size. We'll use our private `element_position/2` to convert
-the next array index (its size) to a position within the `elements` tuple.
+in the tuple and increment the array's size. We'll use the private
+[element_position/2](enumerable#define-arrayshift1) we defined in part 1 to convert the next array
+index (its size) to a position within the `elements` tuple.
 ```elixir
 defmodule Array do
   # ...
