@@ -1,12 +1,6 @@
----
-layout: post
-title:  "Collectable: Custom Data Structures in Elixir, part 2"
-date:   2020-09-28 17:15:00 -0600
-categories: elixir protocol collectable
-permalink: /elixir/custom_data_structures/collectable
----
+# Collectable: Custom Data Structures in Elixir, part 2
 
-In the [first post of this series](enumerable) we began creating a custom Array data structure. We
+In the [first post of this series](2020-09-05-enumerable.html) we began creating a custom Array data structure. We
 defined functions to look at the contents and sizes of arrays, and we made our arrays enumerable
 with the [Enumerable](https://hexdocs.pm/elixir/Enumerable.html) protocol. In this post we'll
 looking at putting elements into arrays. We'll also implement the
@@ -65,7 +59,7 @@ end
 
 For now our implementation of `push/2` will be pretty naive; it'll put an element at the next spot
 in the tuple and increment the array's size. We'll use the private
-[element_position/2](enumerable#define-arrayshift1) we defined in part 1 to convert the next array
+[element_position/2](2020-09-05-enumerable.html#define-arrayshift1) we defined in part 1 to convert the next array
 index (its size) to a position within the `elements` tuple.
 ```elixir
 defmodule Array do
@@ -96,7 +90,7 @@ With `push/2` defined, we can implement Collectable.
 
 ### Implement Collectable.into/1
 Unlike Enumerable, Collectable has only one function we need to implement. Similar to
-[Enumerable.slice/1](enumerable#implement-enumerableslice1),
+[Enumerable.slice/1](2020-09-05-enumerable.html#implement-enumerableslice1),
 [Collectable.into/1](https://hexdocs.pm/elixir/Collectable.html#into/1) does not perform work
 directly. It instead returns a tuple with information then used to collect elements.
 
@@ -198,7 +192,7 @@ end
 ```
 
 We can define `new/0` first. All it needs to do is create an empty array. This will return an Array
-struct with three fields, as explained in the [previous post](enumerable#define-array-struct):
+struct with three fields, as explained in the [previous post](2020-09-05-enumerable.html#define-array-struct):
 > - `elements`  
 >   A tuple containing the elements of the array. This will be at least as large as the number of
 >   elements in the array, and we'll need to swap it out for a larger tuple whenever we exceed its

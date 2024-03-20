@@ -1,10 +1,5 @@
----
-layout: post
-title:  "Enumerable: Custom Data Structures in Elixir, part 1"
-date:   2020-09-05 12:00:00 -0600
-categories: elixir protocol enumerable
-permalink: /elixir/custom_data_structures/enumerable
----
+# Enumerable: Custom Data Structures in Elixir, part 1
+
 Much of the Elixir language is written in Elixir, and it may surprise you how many data structures
 are structs under the hood. Ranges, sets, dates, times--we could build them all ourselves. That's
 hidden through their implementation of various protocols provided by Elixir. One way to see what
