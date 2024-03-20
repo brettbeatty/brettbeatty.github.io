@@ -1,0 +1,542 @@
+<!-- livebook:{"persist_outputs":true} -->
+
+# Alternate Multi-Clause Function Syntax
+
+## Context
+
+This was an experiment I did reimagining the syntax for defining multi-clause functions.
+
+Defining additional clauses for a named function looks the same as defining entirely new functions; the names and arities just match the original.
+
+<!-- livebook:{"force_markdown":true} -->
+
+```elixir
+def first([head | _tail]) do
+  head
+end
+
+def first([]) do
+  nil
+end
+```
+
+When a function has default arguments and multiple clauses, the defaults must live in a separate function head.
+
+<!-- livebook:{"force_markdown":true} -->
+
+```elixir
+def first(list, default \\ nil)
+
+def first([head | _tail], _default) do
+  head
+end
+
+def first([], default) do
+  []
+end
+```
+
+In my opinion this syntax has a couple downside:
+
+* It can be difficult to see at first glance that definitions are clauses of the same function.
+* Defining many clauses of a function requires repetition of the function name.
+
+Multi-clause anonymous functions have a much more succinct syntax.
+
+<!-- livebook:{"force_markdown":true} -->
+
+```elixir
+fn
+  [head | _tail], _default ->
+    head
+
+  [], default ->
+    default
+end
+```
+
+The anonymous function syntax is a lot clearer at first glance, and it seems more consistent with other Elixir constructs such as `case/1`. Unfortunately there's not a great way to use this syntax with named functions, and since anonymous functions must be a consistent arity, their syntax doesn't provide for default arguments.
+
+This experiment is an attempt to combine my favorite parts of both syntaxes. It will enable definitions such as this:
+
+<!-- livebook:{"force_markdown":true} -->
+
+```elixir
+def first(list, default \\ nil) do
+  [head | _tail], _default ->
+    head
+
+  [], default ->
+    default
+end
+```
+
+## Implementation
+
+To support the syntax I created a new set of "def" macros. They look for use of the new
+syntax and transform it to multiple clauses of the function, falling back to their `Kernel`
+counterparts if the new syntax is not used.
+
+### TL;DR
+
+To support the syntax, I created a new set of "def" macros. They look for use of the new syntax and transform it to multiple clauses of the function, falling back to their `Kernel` counterparts if the new syntax is not used.
+
+[Skip implementation details.](#usage)
+
+### Macros
+
+The macros implemented are `def/2`, `defp/2`, `defmacro/2`, and `defmacrop/2`. Each will use a shared function `define/4` for building the returned code.
+
+```elixir
+macros =
+  quote do
+    defmacro def(call, expr) do
+      define(:def, call, expr, __CALLER__)
+    end
+
+    defmacro defp(call, expr) do
+      define(:defp, call, expr, __CALLER__)
+    end
+
+    defmacro defmacro(call, expr) do
+      define(:defmacro, call, expr, __CALLER__)
+    end
+
+    defmacro defmacrop(call, expr) do
+      define(:defmacrop, call, expr, __CALLER__)
+    end
+  end
+
+:ok
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+:ok
+```
+
+The shared private function `define/4` parses the code passed to the macros. If the function head is formatted properly, and if the function body is 2 or more `->` clauses of the same arity as the head, a block of definitions is built and returned.
+
+If the function head is not properly formatted, or if the function body does not comprise `->` clauses, `define/4` falls back to the appropriate def macro in `Kernel`.
+
+If any of the `->` are of a different arity than the function head, a compile error is raised.
+
+```elixir
+define =
+  quote do
+    @typep def_type() :: :def | :defp | :defmacro | :defmacrop
+
+    @spec define(def_type(), Macro.t(), Macro.t(), Macro.Env.t()) :: Macro.t()
+    defp define(type, call, expr, env) do
+      with {:ok, name, arity} <- parse_call(call),
+           {:ok, clauses, rest} <- parse_expr(expr, arity) do
+        quote do
+          # define a function head with original call to handle argument names and defaults
+          unquote(build_definition(type, call, nil))
+
+          # define each clause
+          unquote_splicing(build_definitions(type, name, clauses, rest))
+        end
+      else
+        # if new syntax not used, fallback to original
+        :fallback ->
+          build_definition(type, call, expr)
+
+        # not all clauses match function arity
+        {:arity, actual: actual, expected: expected, line: line} ->
+          raise CompileError,
+            description: "incorrect arity; expected: #{expected}, got: #{actual}",
+            file: env.file,
+            line: line || env.line
+      end
+    end
+  end
+
+:ok
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+:ok
+```
+
+### Parsing calls
+
+The `call` argument to the macros looks like a function call. Its AST is a 3-arity tuple containing the function name, code metadata, and arguments.
+
+```elixir
+quote do: first(list, default \\ nil)
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{:first, [], [{:list, [], Elixir}, {:\\, [], [{:default, [], Elixir}, nil]}]}
+```
+
+A variable's AST looks a lot like a function call's AST except in place of a list of args there's an atom context. A definition for a 0-arity function or macro without parentheses will receive a variable here instead of a function call, but you can't have multiple clauses of a 0-arity function, so those can fall back to the `Kernel` macros.
+
+```elixir
+quote do: first
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{:first, [], Elixir}
+```
+
+The `parse_call/1` function just checks that the function name is an atom and that arguments is a list, and it returns the name and arity (length of argument list).
+
+```elixir
+parse_call =
+  quote do
+    @spec parse_call(Macro.t()) :: {:ok, atom(), arity()} | :fallback
+    defp parse_call(call)
+
+    defp parse_call({name, _meta, args}) when is_atom(name) and is_list(args) do
+      {:ok, name, length(args)}
+    end
+
+    defp parse_call(_call) do
+      :fallback
+    end
+  end
+
+:ok
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+:ok
+```
+
+### Parsing function bodies
+
+Parsing `expr` is a little more involved. It should be a keyword list starting with `:do` and a list of calls to a `:->` function. One clause of `parse_expr/2` will match on a list with a `{:do, block}` keyword at its head where `block` is a list with `{:->, _, _}` at its head. It parses all the `->` clauses and checks their arities. Anything else signals a need to fall back to `Kernel` defs.
+
+```elixir
+parse_expr =
+  quote do
+    @typep clause() :: {[Macro.t()], guard(), keyword(), Macro.t()}
+
+    # explained later, but I'll store parsed guards as functions
+    @typep guard() :: (Macro.t() -> Macro.t())
+
+    @spec parse_expr(Macro.t(), arity()) ::
+            {:ok, [clause()], keyword()} | :fallback | {:arity, keyword()}
+    defp parse_expr(expr, arity)
+
+    defp parse_expr([{:do, clauses = [{:->, _, _} | _]} | rest], arity) do
+      parsed_clauses = Enum.map(clauses, &parse_clause/1)
+
+      case Enum.find(parsed_clauses, &bad_arity?(&1, arity)) do
+        {args, _guard, meta, _block} ->
+          {:arity, actual: length(args), expected: arity, line: meta[:line]}
+
+        nil ->
+          {:ok, parsed_clauses, rest}
+      end
+    end
+
+    defp parse_expr(_expr, _arity) do
+      :fallback
+    end
+
+    @spec bad_arity?(clause(), arity()) :: boolean()
+    defp bad_arity?({args, _guard, _meta, _block}, arity) do
+      length(args) != arity
+    end
+  end
+
+:ok
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+:ok
+```
+
+### Parsing clauses and guards
+
+Guards appear differently in the AST between the named function syntax and the anonymous function syntax.
+
+They always look like a call to a non-existent function named "when", but for named functions the first argument is the entire function call.
+
+```elixir
+quote do
+  do_something(a, b) when is_atom(a)
+end
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{:when, [],
+ [
+   {:do_something, [], [{:a, [], Elixir}, {:b, [], Elixir}]},
+   {:is_atom, [context: Elixir, imports: [{1, Kernel}]], [{:a, [], Elixir}]}
+ ]}
+```
+
+But for anonymous functions (or case clauses or the like), the arguments to "when" are all the arguments plus the guard.
+
+```elixir
+[{:->, [], [[guard], _block]}] =
+  quote do
+    a, b when is_atom(a) -> {a, b}
+  end
+
+guard
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{:when, [],
+ [
+   {:a, [], Elixir},
+   {:b, [], Elixir},
+   {:is_atom, [context: Elixir, imports: [{1, Kernel}]], [{:a, [], Elixir}]}
+ ]}
+```
+
+For each clause, `parse_clause/1` uses `parse_guard/1` to check the args for a guard and return a function that applies the guard to a block of code. If there is no guard it returns `Function.identity/1`, which takes an AST (or any value) and returns it as is.
+
+```elixir
+parse_clause =
+  quote do
+    @spec parse_clause(Macro.t()) :: clause()
+    defp parse_clause({:->, meta, [args, block]}) do
+      {args, guard} = parse_guard(args)
+      {args, guard, meta, block}
+    end
+
+    @spec parse_guard(Macro.t()) :: {[Macro.t()], guard()}
+    defp parse_guard(args)
+
+    defp parse_guard([{:when, meta, args}]) do
+      {args, [guard]} = Enum.split(args, -1)
+      {args, &{:when, meta, [&1, guard]}}
+    end
+
+    defp parse_guard(args) do
+      {args, &Function.identity/1}
+    end
+  end
+
+:ok
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+:ok
+```
+
+### Building definitions
+
+Compared to the parsing, it's fairly easy to build the calls that actually define functions.
+
+The `build_definitions/4` function maps over clauses, builds the ast for a `call` as expected by the `Kernel` defs, applies the parsed guard function, and calls `build_definition/3`.
+
+```elixir
+build_definitions =
+  quote do
+    @spec build_definitions(def_type(), atom(), [clause()], keyword()) :: [Macro.t()]
+    defp build_definitions(type, name, clauses, rest) do
+      Enum.map(clauses, fn {args, guard, meta, block} ->
+        call = guard.({name, meta, args})
+        build_definition(type, call, [{:do, block} | rest])
+      end)
+    end
+  end
+
+:ok
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+:ok
+```
+
+Then `build_definition/3` just returns a call to the appropriate `Kernel` macro.
+
+```elixir
+build_definition =
+  quote do
+    @spec build_definition(def_type(), Macro.t(), Macro.t()) :: Macro.t()
+    defp build_definition(type, call, expr) do
+      quote do
+        Kernel.unquote(type)(unquote(call), unquote(expr))
+      end
+    end
+  end
+
+:ok
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+:ok
+```
+
+### MultiClauseDef module
+
+Now it's time to put it all together. Normally I would use `defmodule/2`, but since all the pieces are quoted expressions a module can be created from an AST using `Module.create/3`.
+
+```elixir
+ast =
+  quote do
+    unquote(macros)
+    unquote(define)
+    unquote(parse_call)
+    unquote(parse_expr)
+    unquote(parse_clause)
+    unquote(build_definitions)
+    unquote(build_definition)
+  end
+
+Module.create(MultiClauseDef, ast, __ENV__)
+:ok
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+:ok
+```
+
+## Usage
+
+The `MultiClauseDef` macros can be imported as long as their `Kernel` counterparts are excluded from beig automatically imported.
+
+Now the new syntax can be used.
+
+```elixir
+defmodule MyModule do
+  import Kernel, except: [def: 2], warn: false
+  import MultiClauseDef, only: [def: 2]
+
+  def first(list, default \\ nil) do
+    [head | _tail], _default ->
+      head
+
+    [], default ->
+      default
+  end
+end
+
+:ok
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+:ok
+```
+
+Using the new syntax, it feels clearer to me that I'm looking at 2 clauses of the `first/2` function instead of different functions.
+
+The defined function works as expected. When passed a non-empty list, the first clause
+matches and returns the first element in the list.
+
+```elixir
+MyModule.first([:a, :b, :c], :d)
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+:a
+```
+
+If the list is empty, the second clause matches and returns the default.
+
+```elixir
+MyModule.first([], :d)
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+:d
+```
+
+And the default argument for default still works.
+
+```elixir
+MyModule.first([])
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+nil
+```
+
+Guard clauses also work as expected, clause order is preserved, and the new macros can be
+used with single-clause functions. To illustrate, I'll create a function that dispatches to
+a recursive private function (the exact functionality is gibberish and doesn't matter).
+
+```elixir
+defmodule AnotherModule do
+  import Kernel, except: [def: 2, defp: 2]
+  import MultiClauseDef, only: [def: 2, defp: 2]
+
+  def do_something(string) when is_binary(string) do
+    do_something(string, [])
+  end
+
+  defp do_something(string, acc) do
+    # upcases lowercase letters
+    <<character, string::binary>>, acc when character in ?a..?z ->
+      do_something(string, [character + ?A - ?a | acc])
+
+    # retains digits
+    <<character, string::binary>>, acc when character in ?0..?9 ->
+      do_something(string, [character | acc])
+
+    # omits any other characters
+    <<_character, string::binary>>, acc ->
+      do_something(string, acc)
+
+    # converts acc (reversed from original) back to string
+    <<>>, acc ->
+      :erlang.list_to_binary(acc)
+  end
+end
+
+:ok
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+:ok
+```
+
+And just to show that compiled into something that does something:
+
+```elixir
+AnotherModule.do_something("Ch4WYqWoXzZ+pWwuvyB/Nsio5LvgUT5kH0Qh9BV5V8Q=")
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+"859H0K5GV5OISYVUWPZOQ4H"
+```
+
+## Wrap Up
+
+Of course I'd never do something like this in production code, but this exercise was fun for
+me. I got to play with metaprogramming, and I'm pretty happy with how the new syntax turned
+out. I feel like especially with the second example the separation between the public
+`do_something/1` and the private `do_something/2` is much clearer than the standard syntax.
