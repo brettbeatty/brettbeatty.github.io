@@ -1,0 +1,61 @@
+name: Publish
+on: push
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Elixir
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: 26.1.2
+          elixir-version: 1.16.1
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Cache dependencies
+        id: deps_cache
+        uses: actions/cache@v4
+        with:
+          path: deps
+          key: ${{ runner.os }}-deps-${{ hashFiles('mix.lock') }}
+          restore-keys: ${{ runner.os }}-deps-
+          save-always: true
+      - name: Install dependencies
+        if: steps.deps_cache.outputs.cache-hit != 'true'
+        run: mix deps.get
+      - name: Cache build
+        uses: actions/cache@v4
+        with:
+          path: _build
+          key: ${{ runner.os }}-build-test-${{ hashFiles('mix.lock') }}
+          restore-keys: ${{ runner.os }}-build-test-
+          save-always: true
+      - name: Build project
+        env:
+          MIX_ENV: test
+        run: mix compile
+      - name: Build docs
+        run: mix docs
+      - name: Build tarball
+        run: tar -czvf docs.tar.gz doc
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: doc
+  deploy:
+    name: Deploy
+    needs: build
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
