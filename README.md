@@ -1,4 +1,4 @@
-# Brett Beatty's Dev Blog
+# Brett's Dev Blog
 
 Every once in a while I get the itch to write, so I set this up as a place to do that.
 

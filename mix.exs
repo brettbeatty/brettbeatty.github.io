@@ -4,7 +4,7 @@ defmodule MyProject do
   def project do
     [
       app: :my_app,
-      version: "2024.3.20",
+      version: "2024.3.21",
       elixir: "~> 1.16",
       deps: deps(),
       # docs
