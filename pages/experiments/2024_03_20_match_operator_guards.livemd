@@ -1,0 +1,531 @@
+<!-- livebook:{"persist_outputs":true} -->
+
+# Match Operator Guards
+
+## Context
+
+One of my favorite things about Elixir is pattern matching, and [guards](https://hexdocs.pm/elixir/Kernel.html#module-guards) are a powerful component of that. However, the simplest pattern matching mechanism, the [match operator (=)](https://hexdocs.pm/elixir/pattern-matching.html#the-match-operator), does not allow for guards.
+
+<!-- livebook:{"continue_on_error":true} -->
+
+```elixir
+{:ok, x} when is_integer(x) = {:ok, "not an integer"}
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+error: undefined function when/2 (there is no such import)
+
+```
+
+In this experiment I will attempt to introduce guard clauses to the match operator. I was also talking to a friend today about metaprogramming woes, so I will attempt to talk some about metaprogramming and how I approach such problems.
+
+## Goal
+
+The match operator attempts to pair the match on the left of the operator with the value on the right. If the match succeeds, variables are bound as needed.
+
+```elixir
+{:ok, x} = {:ok, "not an integer"}
+x
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+"not an integer"
+```
+
+If the match fails, a `MatchError` is raised.
+
+<!-- livebook:{"continue_on_error":true} -->
+
+```elixir
+try do
+  {:ok, _x} = :error
+rescue
+  error -> Exception.format(:error, error)
+end
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+"** (MatchError) no match of right hand side value: :error"
+```
+
+My goal for this experiment is to have matching fail when guards are not satisfied.
+
+<!-- livebook:{"force_markdown":true} -->
+
+```elixir
+{:ok, x} when is_integer(x) = {:ok, "not an integer"}
+#=> ** (MatchError) no match of right hand side value: {:ok, "not an integer"}
+```
+
+The match operator should still work as usual when guards return true.
+
+<!-- livebook:{"force_markdown":true} -->
+
+```elixir
+{:ok, x} when is_integer(x) = {:ok, 23}
+#=> {:ok, 23}
+x
+#=> 23
+```
+
+It should also fail as usual when the pattern doesn't match at all.
+
+<!-- livebook:{"force_markdown":true} -->
+
+```elixir
+{:ok, x} when is_integer(x) = :error
+#=> ** (MatchError) no match of right hand side value: :error
+```
+
+## Plan
+
+Often when I want to experiment with tweaking Elixir syntax I check for a function or macro in `Kernel` I can replace with my own version via import. The match operator, however, is `Kernel.SpecialForms.=/2`. Functions in `Kernel.SpecialForms` don't actually get called--the compiler replaces calls to them. That prevents me from making my own `=/2` function and importing it instead of the built-in operator.
+
+I thought my experiment was foiled, but did you notice the error logged by the compiler when I tried using a guard clause with the match operator?
+
+```
+error: undefined function when/2 (there is no such import)
+```
+
+It thinks I'm calling a function named `when/2`. That's not a replaced special form in this context! This is a good point to check out the expression structure using `quote/2`.
+
+```elixir
+quote do
+  {:ok, x} when is_integer(x) = {:ok, "not an integer"}
+end
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{:when, [],
+ [
+   {:ok, {:x, [], Elixir}},
+   {:=, [],
+    [
+      {:is_integer, [context: Elixir, imports: [{1, Kernel}]], [{:x, [], Elixir}]},
+      {:ok, "not an integer"}
+    ]}
+ ]}
+```
+
+I'll talk more quoted expressions further down, but essentially that means my guarded match actually looks something more like this call under the hood.
+
+<!-- livebook:{"force_markdown":true} -->
+
+```elixir
+when({:ok, x}, is_integer(x) = {:ok, "not an integer"})
+```
+
+The operator precedence there is not what I would have guessed, but that works out in my favor. I can define and import a `when/2` macro that transforms the code in those parts to a form that actually works!
+
+What does that transformed code look like? I'm not aware of a way to have the match operator fail on a guard--that's what I'm trying to fix--but guards work fine in other match contexts. The simplest way to go about things is probably just to transform that code into a `case/2` expression like this:
+
+<!-- livebook:{"force_markdown":true} -->
+
+```elixir
+case {:ok, "not an integer"} do
+  {:ok, x} = term when is_integer(x) -> term
+  term -> raise MatchError, term: term
+end
+```
+
+That seems like a good plan, so now I just need a `when/2` macro that performs that transformation.
+
+## Implementation
+
+[Macros](https://hexdocs.pm/elixir/macros.html) are special functions that instead of taking and returning values at runtime take and return code at compile time.
+
+When working with quoted expressions, I often find it helpful to use `Macro.to_string/1` and `IO.puts/1`. So I'll start with a module containing two functions: a `print/1` private function for printing quoted expressions and a `when/2` macro that prints its received arguments and returns `:ok` (atoms are valid quoted expressions of themselves).
+
+There's also a fun hurdle around defining a function named `when/2`. The parser tries interpreting the call as a guard to defining the left value as a function, so I have to include a guard to get things working properly.
+
+```elixir
+defmodule When.Print do
+  defmacro (left when right) when true do
+    print(left)
+    print(right)
+    :ok
+  end
+
+  defp print(quoted) do
+    quoted
+    |> Macro.to_string()
+    |> IO.puts()
+  end
+end
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{:module, When.Print, <<70, 79, 82, 49, 0, 0, 7, ...>>, {:print, 1}}
+```
+
+If I import `when/2` and try my example, it prints the sides.
+
+```elixir
+# I don't want several imports in the top level scope
+import When.Print
+{:ok, x} when is_integer(x) = {:ok, "not an integer"}
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{:ok, x}
+is_integer(x) = {:ok, "not an integer"}
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+:ok
+```
+
+The first argument, `left`, is already in a form I like, but `right` has the form `guard = value`, which I want to split into its parts.
+
+If you recall the quoted expression for the match operator looks like a call to a function named `=/2`.
+
+```elixir
+quote do
+  guard = right
+end
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{:=, [], [{:guard, [], Elixir}, {:right, [], Elixir}]}
+```
+
+That's easy enough to match against. This version of my macro will match `_guard` and `right` out of the second argument, omit `_guard`, and return a `left = right` match (which will also get printed).
+
+```elixir
+defmodule When.Trim do
+  defmacro (left when {:=, meta, [_guard, right]}) when true do
+    {:=, meta, [left, right]}
+    |> tap(&print/1)
+  end
+
+  defp print(quoted) do
+    quoted
+    |> Macro.to_string()
+    |> IO.puts()
+  end
+end
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{:module, When.Trim, <<70, 79, 82, 49, 0, 0, 7, ...>>, {:print, 1}}
+```
+
+Now guard clauses are accepted by the match operator, but they don't actually guard anything.
+
+```elixir
+import When.Print, except: [when: 2], warn: false
+import When.Trim
+{:ok, x} when is_integer(x) = {:ok, "not an integer"}
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{:ok, x} = {:ok, "not an integer"}
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{:ok, "not an integer"}
+```
+
+The actual implementation will be something similar, using `quote/2` and `unquote/1` to build the desired `case/2` call.
+
+```elixir
+defmodule When.Basic do
+  defmacro (left when {:=, _meta, [guard, right]}) when true do
+    quote do
+      case unquote(right) do
+        unquote(left) = term when unquote(guard) -> term
+        term -> raise MatchError, term: term
+      end
+    end
+    |> tap(&print/1)
+  end
+
+  defp print(quoted) do
+    quoted
+    |> Macro.to_string()
+    |> IO.puts()
+  end
+end
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{:module, When.Basic, <<70, 79, 82, 49, 0, 0, 9, ...>>, {:print, 1}}
+```
+
+If I try the new version of the macro, it prints the desired `case/2` block and in this instance raises the desired exception.
+
+```elixir
+import When.Trim, except: [when: 2], warn: false
+import When.Basic
+
+try do
+  {:ok, x} when is_integer(x) = {:ok, "not an integer"}
+rescue
+  error -> Exception.format(:error, error)
+end
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+case {:ok, "not an integer"} do
+  {:ok, x} = term when is_integer(x) -> term
+  term -> raise MatchError, term: term
+end
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+"** (MatchError) no match of right hand side value: {:ok, \"not an integer\"}"
+```
+
+If the guard passes, however, the match succeeds.
+
+```elixir
+{:ok, x} when is_integer(x) = {:ok, 23}
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+case {:ok, 23} do
+  {:ok, x} = term when is_integer(x) -> term
+  term -> raise MatchError, term: term
+end
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{:ok, 23}
+```
+
+The match also continues to fail when it would have before.
+
+```elixir
+try do
+  {:ok, x} when is_integer(x) = :error
+rescue
+  error -> Exception.format(:error, error)
+end
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+case :error do
+  {:ok, x} = term when is_integer(x) -> term
+  term -> raise MatchError, term: term
+end
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+"** (MatchError) no match of right hand side value: :error"
+```
+
+## Multiple Guards
+
+Matches can use `when` more than once, so I will want to support that too.
+
+In the source quoted expression, `left` will be the first argument in the topmost `when` call, `right` will be the second argument in the `=` call, which will be the second argument in the deepest `when` call.
+
+```elixir
+quote do
+  left when a when b when c = right
+end
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{:when, [context: Elixir, imports: [{2, When.Basic}]],
+ [
+   {:left, [], Elixir},
+   {:when, [context: Elixir, imports: [{2, When.Basic}]],
+    [
+      {:a, [], Elixir},
+      {:when, [context: Elixir, imports: [{2, When.Basic}]],
+       [{:b, [], Elixir}, {:=, [], [{:c, [], Elixir}, {:right, [], Elixir}]}]}
+    ]}
+ ]}
+```
+
+The desired quoted expression looks much the same, a series of `when` calls where the first argument is a guard expression (except for the topmost where the first argument is `left`). The difference is that `c = right` is replaced with `c`.
+
+```elixir
+[{:->, [], [[guards], _term]}] =
+  quote do
+    left when a when b when c -> term
+  end
+
+guards
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{:when, [context: Elixir, imports: [{2, When.Basic}]],
+ [
+   {:left, [], Elixir},
+   {:when, [context: Elixir, imports: [{2, When.Basic}]],
+    [
+      {:a, [], Elixir},
+      {:when, [context: Elixir, imports: [{2, When.Basic}]], [{:b, [], Elixir}, {:c, [], Elixir}]}
+    ]}
+ ]}
+```
+
+I will want to yank `right` out of that deepest level and pass it as the first argument to `case/2`. This seems like a great case for recursion. I want a function that walks through the `when` sequence:
+
+* If call is a `when`, make a recursive call on its second argument to get an extracted `right` and an updated guard chain. Return `when` call with first guard and updated guard chain.
+* If call is `=`, return `right` and guard.
+
+Only the outermost `when` will call my `when/2` macro. The others will be given to `case/2` and treated as special forms.
+
+```elixir
+defmodule When do
+  defmacro (left when guards_and_right) when true do
+    {guards, right} = parse_guards_and_right(guards_and_right)
+
+    quote do
+      case unquote(right) do
+        unquote(left) = term when unquote(guards) -> term
+        term -> raise MatchError, term: term
+      end
+    end
+    |> tap(&print/1)
+  end
+
+  defp parse_guards_and_right(guards_and_right)
+
+  defp parse_guards_and_right({:when, meta, [guard, guards_and_right]}) do
+    {guards, right} = parse_guards_and_right(guards_and_right)
+    {{:when, meta, [guard, guards]}, right}
+  end
+
+  defp parse_guards_and_right({:=, _meta, [guard, right]}) do
+    {guard, right}
+  end
+
+  defp print(quoted) do
+    quoted
+    |> Macro.to_string()
+    |> IO.puts()
+  end
+end
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{:module, When, <<70, 79, 82, 49, 0, 0, 10, ...>>, {:print, 1}}
+```
+
+This new macro supports multiple guards, which allow a match as long as one guard succeeds.
+
+```elixir
+import When.Basic, except: [when: 2], warn: false
+import When
+
+{:ok, x} when is_integer(x) when is_binary(x) = {:ok, "not an integer"}
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+case {:ok, "not an integer"} do
+  {:ok, x} = term when is_integer(x) when is_binary(x) -> term
+  term -> raise MatchError, term: term
+end
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+{:ok, "not an integer"}
+```
+
+Matching still fails if none of the guards pass.
+
+```elixir
+try do
+  {:ok, x} when is_integer(x) when is_binary(x) = {:ok, []}
+rescue
+  error -> Exception.format(:error, error)
+end
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+case {:ok, []} do
+  {:ok, x} = term when is_integer(x) when is_binary(x) -> term
+  term -> raise MatchError, term: term
+end
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+"** (MatchError) no match of right hand side value: {:ok, []}"
+```
+
+Matching also continues to fail for match errors beyond the guards.
+
+```elixir
+try do
+  {:ok, x} when is_integer(x) when is_binary(x) = :error
+rescue
+  error -> Exception.format(:error, error)
+end
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+case :error do
+  {:ok, x} = term when is_integer(x) when is_binary(x) -> term
+  term -> raise MatchError, term: term
+end
+```
+
+<!-- livebook:{"output":true} -->
+
+```
+"** (MatchError) no match of right hand side value: :error"
+```
+
+## Conclusion
+
+My goal was to add support for guard clauses to the match operator, with everything working as one might expect. As far as I can tell I accomplished that, so in that regard I feel good about this experiment.
+
+I had also intended to show some of my process for approaching difficult quoted expressions, and I'm not sure I did that as well as I'd hoped.
+
+Overall, though, I'm pretty happy with the macro. It's fairly simple, but (in my opinion) it feels like a natural part of the language.
