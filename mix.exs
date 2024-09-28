@@ -4,7 +4,7 @@ defmodule MyProject do
   def project do
     [
       app: :my_app,
-      version: "2024.3.21",
+      version: "2024.9.28",
       elixir: "~> 1.16",
       deps: deps(),
       # docs
@@ -29,6 +29,7 @@ defmodule MyProject do
       main: latest(pages),
       extras: pages,
       groups_for_extras: [
+        Snippets: ~r(/snippets/),
         Experiments: ~r(/experiments/),
         Legacy: ~r(/legacy/)
       ],
