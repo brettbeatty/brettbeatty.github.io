@@ -35,7 +35,7 @@ defmodule MyProject do
       ],
       api_reference: false,
       formatters: ["html"],
-      # assets: "assets",
+      assets: %{"assets/unlisted" => "/"},
       logo: "assets/logo.jpg"
     ]
   end
